@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 export const runtime = "nodejs";
@@ -94,14 +96,16 @@ export async function POST(req: Request) {
     if (body.apiSecret?.trim()) env.ALPACA_API_SECRET = body.apiSecret.trim();
   }
 
-  // ── command: prefer a prebuilt binary, fall back to `cargo run` ───────────────
-  const binOverride = process.env.BACKTEST_BIN;
-  const [cmd, args] = binOverride
-    ? [binOverride, [] as string[]]
-    : ["cargo", ["run", "--release", "--quiet", "--bin", "backtest"]];
+  // ── resolve how to run the backtest ──────────────────────────────────────────
+  const runner = resolveRunner(repoRoot);
+  // Ensure cargo's own bin dir (rustc, the toolchain) is reachable even when the
+  // Node server was started without ~/.cargo/bin on its PATH.
+  if (runner.extraPathDir) {
+    env.PATH = `${runner.extraPathDir}${path.delimiter}${env.PATH ?? ""}`;
+  }
 
   try {
-    const { code, stdout, stderr } = await runProcess(cmd, args, repoRoot, env);
+    const { code, stdout, stderr } = await runProcess(runner.cmd, runner.args, repoRoot, env);
     if (code !== 0) {
       const detail = (stderr || stdout).trim().split("\n").slice(-8).join("\n");
       return NextResponse.json({ error: `backtest exited with code ${code}`, detail }, { status: 500 });
@@ -113,6 +117,50 @@ export async function POST(req: Request) {
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }
+}
+
+interface Runner {
+  cmd: string;
+  args: string[];
+  extraPathDir?: string; // dir to prepend to the child's PATH (cargo's bin dir)
+}
+
+/** Locate `cargo`, preferring rustup's default install dir if it isn't on PATH. */
+function findCargo(): { cargo: string; binDir?: string } {
+  const candidates = [
+    process.env.CARGO_HOME ? path.join(process.env.CARGO_HOME, "bin", "cargo") : null,
+    path.join(os.homedir(), ".cargo", "bin", "cargo"),
+    "/root/.cargo/bin/cargo",
+    "/usr/local/cargo/bin/cargo", // common in rust docker images
+  ].filter((p): p is string => !!p);
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return { cargo: c, binDir: path.dirname(c) };
+  }
+  return { cargo: "cargo" }; // fall back to PATH lookup
+}
+
+/**
+ * Decide how to invoke the backtest, most-robust first:
+ *   1. BACKTEST_BIN env override (explicit prebuilt binary)
+ *   2. an existing target/release/backtest (no cargo needed)
+ *   3. `cargo run`, with cargo resolved from ~/.cargo/bin if not on PATH
+ */
+function resolveRunner(repoRoot: string): Runner {
+  const override = process.env.BACKTEST_BIN?.trim();
+  if (override) {
+    const abs = path.isAbsolute(override) ? override : path.resolve(repoRoot, override);
+    return { cmd: abs, args: [] };
+  }
+  for (const rel of ["target/release/backtest", "target/release/backtest.exe"]) {
+    const abs = path.join(repoRoot, rel);
+    if (fs.existsSync(abs)) return { cmd: abs, args: [] };
+  }
+  const { cargo, binDir } = findCargo();
+  return {
+    cmd: cargo,
+    args: ["run", "--release", "--quiet", "--bin", "backtest"],
+    extraPathDir: binDir,
+  };
 }
 
 function runProcess(
@@ -136,7 +184,10 @@ function runProcess(
       clearTimeout(timer);
       reject(
         (err as NodeJS.ErrnoException).code === "ENOENT"
-          ? new Error(`'${cmd}' not found — install Rust/cargo or set BACKTEST_BIN to the compiled binary`)
+          ? new Error(
+              `'${cmd}' not found. Install Rust (https://rustup.rs), or build once with ` +
+              `'cargo build --release --bin backtest' and set BACKTEST_BIN to the binary path.`,
+            )
           : err,
       );
     });
