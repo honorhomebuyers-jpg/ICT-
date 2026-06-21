@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import BacktestRunner from "@/components/BacktestRunner";
 
 export const metadata: Metadata = {
   title: "Backtest Results",
@@ -70,6 +71,9 @@ export default function BacktestPage() {
           London + NY killzone filter applied.
         </p>
       </section>
+
+      {/* Interactive runner */}
+      <BacktestRunner />
 
       {/* Highlight card */}
       <div className="card-featured p-10 mb-6">

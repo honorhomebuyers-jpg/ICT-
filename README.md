@@ -61,7 +61,15 @@ cargo run --release --bin hermes
 
 ### Backtest with Alpaca data
 
-No MT5 bridge required — fetch candles straight from Alpaca:
+No MT5 bridge required — fetch candles straight from Alpaca. The fastest way to
+enter your keys is the interactive setup command:
+
+```bash
+./scripts/setup-keys.sh      # prompts for keys + symbol, writes them to .env
+cargo run --release --bin backtest
+```
+
+Or configure `.env` by hand:
 
 ```bash
 # .env:
@@ -75,6 +83,20 @@ BACKTEST_CANDLES=5000
 
 cargo run --release --bin backtest
 ```
+
+### Run a backtest from the web UI
+
+The **Backtest** page in the web dashboard (`web/`) has an interactive runner:
+choose a data source, **select a symbol** (or enter a custom one), pick the
+timeframe, optionally paste Alpaca keys, and hit **Run Backtest** to execute the
+strategy and see live metrics.
+
+```bash
+cd web && npm install && npm run dev   # http://localhost:3000/backtest
+```
+
+The runner shells out to the `backtest` binary. Set `BACKTEST_BIN` to a prebuilt
+binary path to skip `cargo run` on each request.
 
 Alpaca options: `ALPACA_FEED` (`iex` free / `sip` paid, stocks only),
 `ALPACA_CRYPTO_LOC` (crypto only), `ALPACA_DIGITS` (price precision), and
