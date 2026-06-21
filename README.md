@@ -17,8 +17,12 @@ hermes/
     ├── ict/             # ICT signal detection: BOS/CHoCH, OTE, FVG, OB, PD arrays
     ├── risk/            # Fixed-fractional position sizing
     ├── mt5-client/      # MT5 bridge HTTP client
+    ├── alpaca-client/   # Alpaca Market Data HTTP client (backtest data source)
     └── engine/          # Orchestrates ICT analysis → risk → order execution
 ```
+
+The backtester can source historical candles from either the **MT5 bridge**
+(default) or the **Alpaca Market Data API**, selected by `DATA_SOURCE`.
 
 ---
 
@@ -48,12 +52,33 @@ All paths require BOS/CHoCH confirmation + EMA trend alignment (H1 + optionally 
 cp .env.example .env
 # edit .env: set MT5_BASE_URL and SYMBOL
 
-# 2. Run backtest
+# 2. Run backtest (MT5 data — default)
 cargo run --release --bin backtest
 
 # 3. Run live (set SYMBOLS= in .env)
 cargo run --release --bin hermes
 ```
+
+### Backtest with Alpaca data
+
+No MT5 bridge required — fetch candles straight from Alpaca:
+
+```bash
+# .env:
+DATA_SOURCE=alpaca
+ALPACA_API_KEY=your_key            # paper keys work for market data
+ALPACA_API_SECRET=your_secret
+ALPACA_ASSET_CLASS=stock           # or: crypto
+SYMBOL=AAPL                        # stock: AAPL  |  crypto: BTC/USD
+TIMEFRAME=M15
+BACKTEST_CANDLES=5000
+
+cargo run --release --bin backtest
+```
+
+Alpaca options: `ALPACA_FEED` (`iex` free / `sip` paid, stocks only),
+`ALPACA_CRYPTO_LOC` (crypto only), `ALPACA_DIGITS` (price precision), and
+`ALPACA_DATA_URL` (base URL override). See [`.env.example`](.env.example).
 
 ---
 
@@ -98,7 +123,9 @@ Key variables:
 ## Requirements
 
 - **Rust** 1.80+ (edition 2024)
-- **MT5 bridge** running and accessible at `MT5_BASE_URL`
+- **MT5 bridge** running and accessible at `MT5_BASE_URL` (for live trading, and
+  backtesting with `DATA_SOURCE=mt5`)
+- **Alpaca API keys** (only for backtesting with `DATA_SOURCE=alpaca`)
 
 ---
 

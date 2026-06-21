@@ -173,6 +173,81 @@ fn fmt_pnl(pnl: Decimal) -> String {
     }
 }
 
+/// Historical-data backend. Selected by `DATA_SOURCE` (default `mt5`).
+///
+/// Both backends yield identical `domain::Candle` / `domain::Symbol` values so the
+/// rest of the backtester is agnostic to where the data came from.
+enum Feed {
+    Mt5(mt5_client::Mt5Client),
+    Alpaca(alpaca_client::AlpacaClient),
+}
+
+impl Feed {
+    /// Build the feed from environment variables.
+    ///
+    /// `DATA_SOURCE=mt5`   → requires `MT5_BASE_URL`.
+    /// `DATA_SOURCE=alpaca`→ requires `ALPACA_API_KEY` + `ALPACA_API_SECRET`;
+    ///                        optional `ALPACA_ASSET_CLASS` (stock|crypto),
+    ///                        `ALPACA_FEED` (iex|sip), `ALPACA_CRYPTO_LOC`,
+    ///                        `ALPACA_DIGITS`, `ALPACA_DATA_URL`.
+    fn from_env() -> anyhow::Result<Self> {
+        let source = std::env::var("DATA_SOURCE")
+            .unwrap_or_else(|_| "mt5".to_string())
+            .trim()
+            .to_lowercase();
+        match source.as_str() {
+            "mt5" => {
+                let base = std::env::var("MT5_BASE_URL").context("MT5_BASE_URL missing")?;
+                Ok(Feed::Mt5(mt5_client::Mt5Client::new(base)))
+            }
+            "alpaca" => {
+                let api_key = std::env::var("ALPACA_API_KEY")
+                    .context("ALPACA_API_KEY missing (required for DATA_SOURCE=alpaca)")?;
+                let api_secret = std::env::var("ALPACA_API_SECRET")
+                    .context("ALPACA_API_SECRET missing (required for DATA_SOURCE=alpaca)")?;
+                let asset_class = std::env::var("ALPACA_ASSET_CLASS")
+                    .unwrap_or_else(|_| "stock".to_string())
+                    .parse::<alpaca_client::AssetClass>()
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let feed = std::env::var("ALPACA_FEED").unwrap_or_else(|_| "iex".to_string());
+                let crypto_loc = std::env::var("ALPACA_CRYPTO_LOC").unwrap_or_else(|_| "us".to_string());
+                let digits = std::env::var("ALPACA_DIGITS")
+                    .unwrap_or_else(|_| "2".to_string())
+                    .parse::<u8>()
+                    .context("ALPACA_DIGITS must be 0-28")?;
+                let base_url = std::env::var("ALPACA_DATA_URL")
+                    .unwrap_or_else(|_| alpaca_client::DEFAULT_DATA_URL.to_string());
+                let cfg = alpaca_client::AlpacaConfig {
+                    base_url, api_key, api_secret, asset_class, feed, crypto_loc, digits,
+                };
+                Ok(Feed::Alpaca(alpaca_client::AlpacaClient::new(cfg)))
+            }
+            other => anyhow::bail!("unknown DATA_SOURCE '{other}' (expected 'mt5' or 'alpaca')"),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Feed::Mt5(_)    => "mt5",
+            Feed::Alpaca(_) => "alpaca",
+        }
+    }
+
+    async fn symbol(&self, name: &str) -> anyhow::Result<domain::Symbol> {
+        match self {
+            Feed::Mt5(c)    => Ok(c.symbol(name).await?),
+            Feed::Alpaca(c) => Ok(c.synth_symbol(name)),
+        }
+    }
+
+    async fn rates(&self, name: &str, tf: domain::Timeframe, count: u32) -> anyhow::Result<Vec<domain::Candle>> {
+        match self {
+            Feed::Mt5(c)    => Ok(c.rates_from_pos(name, tf, 0, count).await?),
+            Feed::Alpaca(c) => Ok(c.recent_bars(name, tf, count).await?),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -184,7 +259,6 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let mt5_base_url = std::env::var("MT5_BASE_URL").context("MT5_BASE_URL missing")?;
     let symbol           = std::env::var("SYMBOL").context("SYMBOL missing")?;
     let timeframe_str    = std::env::var("TIMEFRAME").context("TIMEFRAME missing")?;
     let window_size      = std::env::var("CANDLE_COUNT")
@@ -346,13 +420,13 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let tf_short = timeframe_str.as_str();
 
-    let mt5 = mt5_client::Mt5Client::new(mt5_base_url);
+    let feed = Feed::from_env()?;
 
-    tracing::info!(symbol = %symbol, timeframe = ?timeframe, backtest_candles, "fetching historical data");
+    tracing::info!(symbol = %symbol, timeframe = ?timeframe, backtest_candles, source = feed.name(), "fetching historical data");
 
     let (symbol_info, candles) = tokio::try_join!(
-        mt5.symbol(&symbol),
-        mt5.rates_from_pos(&symbol, timeframe, 0, backtest_candles),
+        feed.symbol(&symbol),
+        feed.rates(&symbol, timeframe, backtest_candles),
     )?;
 
     // Fetch/prepare candles and precompute rolling EMA for trend filter.
@@ -366,7 +440,7 @@ async fn main() -> anyhow::Result<()> {
             (vec![], emas) // empty candles vec signals "use H1 index directly"
         } else {
             tracing::info!(ema_period = trend_ema_period, tf = "H4", "fetching H4 candles for trend filter");
-            let h4 = mt5.rates_from_pos(&symbol, domain::Timeframe::H4, 0, backtest_candles / 4 + 200).await?;
+            let h4 = feed.rates(&symbol, domain::Timeframe::H4, backtest_candles / 4 + 200).await?;
             let closes: Vec<Decimal> = h4.iter().map(|c| c.close).collect();
             let emas = rolling_ema(&closes, trend_ema_period);
             (h4, emas)
@@ -378,7 +452,7 @@ async fn main() -> anyhow::Result<()> {
     // H4 confirmation filter: fetch H4 EMA independently of the H1 trend filter.
     let (h4c_candles, h4c_emas): (Vec<domain::Candle>, Vec<Option<Decimal>>) = if trend_h4_confirm {
         tracing::info!(ema_period = trend_h4_period, "fetching H4 candles for H4 confirmation");
-        let h4 = mt5.rates_from_pos(&symbol, domain::Timeframe::H4, 0, backtest_candles / 4 + 200).await?;
+        let h4 = feed.rates(&symbol, domain::Timeframe::H4, backtest_candles / 4 + 200).await?;
         let closes: Vec<Decimal> = h4.iter().map(|c| c.close).collect();
         let emas = rolling_ema(&closes, trend_h4_period);
         (h4, emas)

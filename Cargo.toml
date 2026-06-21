@@ -2,6 +2,7 @@
 members = [
     "crates/domain",
     "crates/mt5-client",
+    "crates/alpaca-client",
     "crates/ict",
     "crates/risk",
     "crates/engine",
@@ -13,8 +14,9 @@ resolver = "2"
 
 [workspace.dependencies]
 # --- internal crates ---
-domain     = { path = "crates/domain" }
-mt5-client = { path = "crates/mt5-client" }
+domain       = { path = "crates/domain" }
+mt5-client   = { path = "crates/mt5-client" }
+alpaca-client = { path = "crates/alpaca-client" }
 ict        = { path = "crates/ict" }
 risk       = { path = "crates/risk" }
 engine     = { path = "crates/engine" }
